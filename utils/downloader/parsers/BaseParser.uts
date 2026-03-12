@@ -1,0 +1,36 @@
+/**
+ * 解析器基类
+ * 所有格式解析器都应继承此类
+ */
+import { SegmentInfo } from '../types.uts'
+
+export abstract class BaseParser {
+	protected baseUrl : string = ''
+	
+	constructor(baseUrl : string) {
+		this.baseUrl = baseUrl
+	}
+	
+	/**
+	 * 解析内容获取分片列表
+	 */
+	abstract parse(content : string) : SegmentInfo[]
+	
+	/**
+	 * 获取完整URL
+	 */
+	protected resolveUrl(path : string) : string {
+		if (path.startsWith('http://') || path.startsWith('https://')) {
+			return path
+		}
+		
+		if (path.startsWith('/')) {
+			const urlParts = this.baseUrl.split('/')
+			return `${urlParts[0]}//${urlParts[2]}${path}`
+		}
+		
+		const lastSlashIndex = this.baseUrl.lastIndexOf('/')
+		const basePath = this.baseUrl.substring(0, lastSlashIndex + 1)
+		return basePath + path
+	}
+}

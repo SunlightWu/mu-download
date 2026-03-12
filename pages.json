@@ -1,0 +1,36 @@
+{
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationBarTitleText": "工具箱"
+			}
+		},
+		{
+			"path": "pages/m3u8/input",
+			"style": {
+				"navigationBarTitleText": "M3U8下载",
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/m3u8/detail",
+			"style": {
+				"navigationBarTitleText": "下载详情页"
+			}
+		},
+		{
+			"path": "pages/history/index",
+			"style": {
+				"navigationBarTitleText": "下载记录"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "white",
+		"navigationBarTitleText": "工具箱",
+		"navigationBarBackgroundColor": "#007AFF",
+		"backgroundColor": "#F5F5F5"
+	},
+	"uniIdRouter": {}
+}

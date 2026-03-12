@@ -1,0 +1,170 @@
+/**
+ * 下载任务类
+ * 管理单个下载任务的状态和操作
+ */
+import {
+	DownloadStatus,
+	DownloadTaskConfig,
+	DownloadTaskInfo,
+	DownloadProgress,
+	SegmentInfo
+} from '../types.uts'
+
+export class DownloadTask {
+	private _config : DownloadTaskConfig
+	private _status : DownloadStatus = 'pending'
+	private _segments : SegmentInfo[] = []
+	private _createdAt : number = Date.now()
+	private _updatedAt : number = Date.now()
+	private _errorMsg : string = ''
+	private _downloadedBytes : number = 0
+	private _lastSpeedCalcTime : number = 0
+	private _lastDownloadedBytes : number = 0
+	private _currentSpeed : number = 0
+
+	constructor(config : DownloadTaskConfig) {
+		this._config = config
+	}
+
+	get id() : string {
+		return this._config.id
+	}
+
+	get config() : DownloadTaskConfig {
+		return this._config
+	}
+
+	get status() : DownloadStatus {
+		return this._status
+	}
+
+	set status(value : DownloadStatus) {
+		this._status = value
+		this._updatedAt = Date.now()
+	}
+
+	get segments() : SegmentInfo[] {
+		return this._segments
+	}
+
+	set segments(value : SegmentInfo[]) {
+		this._segments = value
+	}
+
+	get errorMsg() : string {
+		return this._errorMsg
+	}
+
+	set errorMsg(value : string) {
+		this._errorMsg = value
+	}
+
+	/**
+	 * 获取下载进度
+	 */
+	getProgress() : DownloadProgress {
+		let downloadedCount = 0
+		for (let i = 0; i < this._segments.length; i++) {
+			if (this._segments[i].downloaded) {
+				downloadedCount++
+			}
+		}
+
+		const total = this._segments.length
+		const percent = total > 0 ? Math.floor((downloadedCount / total) * 100) : 0
+
+		return {
+			taskId: this._config.id,
+			totalSegments: total,
+			downloadedSegments: downloadedCount,
+			percent: percent,
+			speed: this._currentSpeed,
+			status: this._status
+		}
+	}
+
+	/**
+	 * 更新速度计算
+	 */
+	updateSpeed(downloadedBytes : number) : void {
+		this._downloadedBytes = downloadedBytes
+		const now = Date.now()
+
+		if (this._lastSpeedCalcTime > 0) {
+			const timeDiff = (now - this._lastSpeedCalcTime) / 1000
+			if (timeDiff >= 1) {
+				const bytesDiff = this._downloadedBytes - this._lastDownloadedBytes
+				this._currentSpeed = Math.floor(bytesDiff / timeDiff)
+				this._lastSpeedCalcTime = now
+				this._lastDownloadedBytes = this._downloadedBytes
+			}
+		} else {
+			this._lastSpeedCalcTime = now
+			this._lastDownloadedBytes = downloadedBytes
+		}
+	}
+
+	/**
+	 * 标记分片完成
+	 */
+	markSegmentCompleted(index : number, localPath : string) : void {
+		if (index >= 0 && index < this._segments.length) {
+			this._segments[index].downloaded = true
+			this._segments[index].localPath = localPath
+			this._updatedAt = Date.now()
+		}
+	}
+
+	/**
+	 * 获取未完成的分片
+	 */
+	getPendingSegments() : SegmentInfo[] {
+		const pending : SegmentInfo[] = []
+		for (let i = 0; i < this._segments.length; i++) {
+			if (!this._segments[i].downloaded) {
+				pending.push(this._segments[i])
+			}
+		}
+		return pending
+	}
+
+	/**
+	 * 检查是否全部完成
+	 */
+	isAllCompleted() : boolean {
+		for (let i = 0; i < this._segments.length; i++) {
+			if (!this._segments[i].downloaded) {
+				return false
+			}
+		}
+		return this._segments.length > 0
+	}
+
+	/**
+	 * 导出任务信息（用于持久化）
+	 */
+	toTaskInfo() : DownloadTaskInfo {
+		return {
+			config: this._config,
+			status: this._status,
+			progress: this.getProgress(),
+			segments: this._segments,
+			createdAt: this._createdAt,
+			updatedAt: this._updatedAt,
+			errorMsg: this._errorMsg
+		}
+	}
+
+	/**
+	 * 从任务信息恢复（用于断点续传）
+	 */
+	static fromTaskInfo(info : DownloadTaskInfo) : DownloadTask {
+		const task = new DownloadTask(info.config)
+		task._status = info.status
+		task._segments = info.segments
+		task._createdAt = info.createdAt
+		task._updatedAt = info.updatedAt
+		task._errorMsg = info.errorMsg
+		return task
+	}
+}

@@ -1,0 +1,35 @@
+# uni-app 编译输出
+unpackage/
+
+# HBuilderX 配置
+.hbuilderx/
+
+# 依赖目录
+node_modules/
+
+# 日志文件
+*.log
+npm-debug.log*
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE 配置
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+
+# 本地环境配置
+.env.local
+.env.*.local

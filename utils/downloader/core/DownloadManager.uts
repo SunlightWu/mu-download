@@ -1,0 +1,325 @@
+/**
+ * 下载管理器
+ * 统一管理所有下载任务
+ */
+import { DownloadTask } from './DownloadTask.uts'
+import { BaseHandler, ProgressCallback, CompleteCallback, ErrorCallback } from '../handlers/BaseHandler.uts'
+import { M3u8Handler } from '../handlers/M3u8Handler.uts'
+import {
+	DownloadType,
+	DownloadTaskConfig,
+	DownloadTaskInfo,
+	DownloadProgress
+} from '../types.uts'
+
+// 存储键名
+const STORAGE_KEY = 'download_tasks'
+
+export class DownloadManager {
+	private static instance : DownloadManager | null = null
+	
+	private tasks : Map<string, DownloadTask> = new Map()
+	private handlers : Map<string, BaseHandler> = new Map()
+	private defaultSavePath : string = ''
+	private defaultConcurrency : number = 3
+	
+	// 全局回调
+	private globalProgressCallback : ProgressCallback | null = null
+	private globalCompleteCallback : CompleteCallback | null = null
+	private globalErrorCallback : ErrorCallback | null = null
+	
+	private constructor() {
+		this.initDefaultPath()
+		this.loadTasks()
+	}
+	
+	/**
+	 * 获取单例实例
+	 */
+	static getInstance() : DownloadManager {
+		if (DownloadManager.instance == null) {
+			DownloadManager.instance = new DownloadManager()
+		}
+		return DownloadManager.instance!
+	}
+	
+	/**
+	 * 初始化默认保存路径
+	 */
+	private initDefaultPath() : void {
+		// #ifdef APP-ANDROID
+		this.defaultSavePath = `${uni.env.USER_DATA_PATH}/downloads`
+		// #endif
+		// #ifdef APP-IOS
+		this.defaultSavePath = `${uni.env.USER_DATA_PATH}/downloads`
+		// #endif
+		// #ifndef APP-ANDROID || APP-IOS
+		this.defaultSavePath = '_downloads'
+		// #endif
+		
+		// 确保目录存在
+		try {
+			uni.getFileSystemManager().mkdirSync(this.defaultSavePath, true)
+		} catch (e) {
+			// 目录可能已存在
+		}
+	}
+	
+	/**
+	 * 设置默认并发数
+	 */
+	setConcurrency(concurrency : number) : void {
+		this.defaultConcurrency = concurrency
+	}
+	
+	/**
+	 * 设置全局进度回调
+	 */
+	setProgressCallback(callback : ProgressCallback) : void {
+		this.globalProgressCallback = callback
+	}
+	
+	/**
+	 * 设置全局完成回调
+	 */
+	setCompleteCallback(callback : CompleteCallback) : void {
+		this.globalCompleteCallback = callback
+	}
+	
+	/**
+	 * 设置全局错误回调
+	 */
+	setErrorCallback(callback : ErrorCallback) : void {
+		this.globalErrorCallback = callback
+	}
+	
+	/**
+	 * 创建下载任务
+	 */
+	createTask(
+		url : string,
+		fileName : string,
+		type : DownloadType = 'm3u8',
+		options : UTSJSONObject | null = null
+	) : DownloadTask {
+		const taskId = this.generateTaskId()
+		
+		const config : DownloadTaskConfig = {
+			id: taskId,
+			url: url,
+			fileName: fileName,
+			type: type,
+			savePath: options?.getString('savePath') ?? this.defaultSavePath,
+			concurrency: options?.getNumber('concurrency')?.toInt() ?? this.defaultConcurrency,
+			headers: options?.getJSON('headers') ?? null
+		}
+		
+		const task = new DownloadTask(config)
+		this.tasks.set(taskId, task)
+		
+		// 创建对应的处理器
+		const handler = this.createHandler(task)
+		this.handlers.set(taskId, handler)
+		
+		// 保存任务
+		this.saveTasks()
+		
+		return task
+	}
+	
+	/**
+	 * 创建处理器
+	 */
+	private createHandler(task : DownloadTask) : BaseHandler {
+		let handler : BaseHandler
+		
+		switch (task.config.type) {
+			case 'm3u8':
+				handler = new M3u8Handler(task)
+				break
+			default:
+				// 默认使用 M3U8 处理器，后续可扩展
+				handler = new M3u8Handler(task)
+		}
+		
+		// 设置回调
+		handler.setProgressCallback((progress : DownloadProgress) => {
+			this.saveTasks()
+			if (this.globalProgressCallback != null) {
+				this.globalProgressCallback!(progress)
+			}
+		})
+		
+		handler.setCompleteCallback((t : DownloadTask, outputPath : string) => {
+			this.saveTasks()
+			if (this.globalCompleteCallback != null) {
+				this.globalCompleteCallback!(t, outputPath)
+			}
+		})
+		
+		handler.setErrorCallback((t : DownloadTask, error : string) => {
+			this.saveTasks()
+			if (this.globalErrorCallback != null) {
+				this.globalErrorCallback!(t, error)
+			}
+		})
+		
+		return handler
+	}
+	
+	/**
+	 * 开始下载
+	 */
+	startTask(taskId : string) : boolean {
+		const handler = this.handlers.get(taskId)
+		if (handler != null) {
+			handler.start()
+			return true
+		}
+		return false
+	}
+	
+	/**
+	 * 暂停下载
+	 */
+	pauseTask(taskId : string) : boolean {
+		const handler = this.handlers.get(taskId)
+		if (handler != null) {
+			handler.pause()
+			this.saveTasks()
+			return true
+		}
+		return false
+	}
+	
+	/**
+	 * 恢复下载
+	 */
+	resumeTask(taskId : string) : boolean {
+		const handler = this.handlers.get(taskId)
+		if (handler != null) {
+			handler.resume()
+			return true
+		}
+		return false
+	}
+	
+	/**
+	 * 取消下载
+	 */
+	cancelTask(taskId : string) : boolean {
+		const handler = this.handlers.get(taskId)
+		if (handler != null) {
+			handler.cancel()
+		}
+		
+		this.tasks.delete(taskId)
+		this.handlers.delete(taskId)
+		this.saveTasks()
+		
+		return true
+	}
+	
+	/**
+	 * 删除任务
+	 */
+	deleteTask(taskId : string) : boolean {
+		return this.cancelTask(taskId)
+	}
+	
+	/**
+	 * 获取任务
+	 */
+	getTask(taskId : string) : DownloadTask | null {
+		return this.tasks.get(taskId) ?? null
+	}
+	
+	/**
+	 * 获取所有任务
+	 */
+	getAllTasks() : DownloadTask[] {
+		const result : DownloadTask[] = []
+		this.tasks.forEach((task, _) => {
+			result.push(task)
+		})
+		return result
+	}
+	
+	/**
+	 * 获取任务进度
+	 */
+	getProgress(taskId : string) : DownloadProgress | null {
+		const task = this.tasks.get(taskId)
+		if (task != null) {
+			return task.getProgress()
+		}
+		return null
+	}
+	
+	/**
+	 * 生成任务ID
+	 */
+	private generateTaskId() : string {
+		return `task_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+	}
+	
+	/**
+	 * 保存任务到本地存储（断点续传支持）
+	 */
+	private saveTasks() : void {
+		const taskInfoList : DownloadTaskInfo[] = []
+		this.tasks.forEach((task, _) => {
+			taskInfoList.push(task.toTaskInfo())
+		})
+		
+		try {
+			uni.setStorageSync(STORAGE_KEY, JSON.stringify(taskInfoList))
+		} catch (e) {
+			console.error('保存任务失败', e)
+		}
+	}
+	
+	/**
+	 * 从本地存储加载任务（断点续传支持）
+	 */
+	private loadTasks() : void {
+		try {
+			const data = uni.getStorageSync(STORAGE_KEY) as string
+			if (data.length > 0) {
+				const taskInfoList = JSON.parse<DownloadTaskInfo[]>(data)
+				if (taskInfoList != null) {
+					for (let i = 0; i < taskInfoList.length; i++) {
+						const info = taskInfoList[i]
+						const task = DownloadTask.fromTaskInfo(info)
+						this.tasks.set(task.id, task)
+						
+						// 重新创建处理器
+						const handler = this.createHandler(task)
+						this.handlers.set(task.id, handler)
+					}
+				}
+			}
+		} catch (e) {
+			console.error('加载任务失败', e)
+		}
+	}
+	
+	/**
+	 * 清除所有已完成的任务
+	 */
+	clearCompletedTasks() : void {
+		const toDelete : string[] = []
+		this.tasks.forEach((task, id) => {
+			if (task.status == 'completed') {
+				toDelete.push(id)
+			}
+		})
+		
+		for (let i = 0; i < toDelete.length; i++) {
+			this.tasks.delete(toDelete[i])
+			this.handlers.delete(toDelete[i])
+		}
+		
+		this.saveTasks()
+	}
+}

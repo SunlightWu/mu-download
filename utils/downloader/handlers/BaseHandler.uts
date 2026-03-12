@@ -1,0 +1,124 @@
+/**
+ * 下载处理器基类
+ * 所有格式处理器都应继承此类
+ */
+import { DownloadTask } from '../core/DownloadTask.uts'
+import { DownloadProgress, SegmentInfo } from '../types.uts'
+
+// 进度回调类型
+export type ProgressCallback = (progress : DownloadProgress) => void
+// 完成回调类型
+export type CompleteCallback = (task : DownloadTask, outputPath : string) => void
+// 错误回调类型
+export type ErrorCallback = (task : DownloadTask, error : string) => void
+
+export abstract class BaseHandler {
+	protected task : DownloadTask
+	protected onProgress : ProgressCallback | null = null
+	protected onComplete : CompleteCallback | null = null
+	protected onError : ErrorCallback | null = null
+	protected isRunning : boolean = false
+	protected isPaused : boolean = false
+
+	constructor(task : DownloadTask) {
+		this.task = task
+	}
+
+	/**
+	 * 设置进度回调
+	 */
+	setProgressCallback(callback : ProgressCallback) : void {
+		this.onProgress = callback
+	}
+
+	/**
+	 * 设置完成回调
+	 */
+	setCompleteCallback(callback : CompleteCallback) : void {
+		this.onComplete = callback
+	}
+
+	/**
+	 * 设置错误回调
+	 */
+	setErrorCallback(callback : ErrorCallback) : void {
+		this.onError = callback
+	}
+
+	/**
+	 * 开始下载
+	 */
+	abstract start() : void
+
+	/**
+	 * 暂停下载
+	 */
+	pause() : void {
+		this.isPaused = true
+		this.task.status = 'paused'
+	}
+
+	/**
+	 * 恢复下载
+	 */
+	resume() : void {
+		this.isPaused = false
+		this.start()
+	}
+
+	/**
+	 * 取消下载
+	 */
+	cancel() : void {
+		this.isRunning = false
+		this.isPaused = false
+	}
+
+	/**
+	 * 通知进度更新
+	 */
+	protected notifyProgress() : void {
+		if (this.onProgress != null) {
+			this.onProgress!(this.task.getProgress())
+		}
+	}
+
+	/**
+	 * 通知下载完成
+	 */
+	protected notifyComplete(outputPath : string) : void {
+		if (this.onComplete != null) {
+			this.onComplete!(this.task, outputPath)
+		}
+	}
+
+	/**
+	 * 通知错误
+	 */
+	protected notifyError(error : string) : void {
+		this.task.errorMsg = error
+		this.task.status = 'failed'
+		if (this.onError != null) {
+			this.onError!(this.task, error)
+		}
+	}
+
+	/**
+	 * 下载单个文件
+	 */
+	protected downloadFile(url : string, savePath : string, headers : UTSJSONObject | null) : Promise<boolean> {
+		return new Promise((resolve, _) => {
+			uni.downloadFile({
+				url: url,
+				filePath: savePath,
+				header: headers != null ? headers.toMap() : {},
+				success: (_) => {
+					resolve(true)
+				},
+				fail: (_) => {
+					resolve(false)
+				}
+			})
+		})
+	}
+}

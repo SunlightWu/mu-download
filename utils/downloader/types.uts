@@ -1,0 +1,59 @@
+/**
+ * 下载器类型定义
+ */
+
+// 下载状态枚举
+export type DownloadStatus = 'pending' | 'downloading' | 'paused' | 'completed' | 'failed' | 'merging'
+
+// 下载类型枚举
+export type DownloadType = 'm3u8' | 'direct' | 'other'
+
+// 分片信息
+export type SegmentInfo = {
+	index : number
+	url : string
+	duration : number
+	downloaded : boolean
+	localPath : string
+}
+
+// 下载进度信息
+export type DownloadProgress = {
+	taskId : string
+	totalSegments : number
+	downloadedSegments : number
+	percent : number
+	speed : number
+	status : DownloadStatus
+}
+
+// 下载任务配置
+export type DownloadTaskConfig = {
+	id : string
+	url : string
+	fileName : string
+	type : DownloadType
+	savePath : string
+	concurrency : number  // 并发数
+	headers : UTSJSONObject | null
+}
+
+// 下载任务信息
+export type DownloadTaskInfo = {
+	config : DownloadTaskConfig
+	status : DownloadStatus
+	progress : DownloadProgress
+	segments : SegmentInfo[]
+	createdAt : number
+	updatedAt : number
+	errorMsg : string
+}
+
+// M3U8 解析结果
+export type M3u8ParseResult = {
+	segments : SegmentInfo[]
+	totalDuration : number
+	isEncrypted : boolean
+	keyUrl : string
+	iv : string
+}

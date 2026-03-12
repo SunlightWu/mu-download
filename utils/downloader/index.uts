@@ -1,0 +1,27 @@
+/**
+ * 下载器模块入口
+ * 导出所有公共API
+ */
+
+// 导出类型
+export {
+	DownloadStatus,
+	DownloadType,
+	SegmentInfo,
+	DownloadProgress,
+	DownloadTaskConfig,
+	DownloadTaskInfo,
+	M3u8ParseResult
+} from './types.uts'
+
+// 导出核心类
+export { DownloadTask } from './core/DownloadTask.uts'
+export { DownloadManager } from './core/DownloadManager.uts'
+
+// 导出解析器
+export { BaseParser } from './parsers/BaseParser.uts'
+export { M3u8Parser } from './parsers/M3u8Parser.uts'
+
+// 导出处理器
+export { BaseHandler, ProgressCallback, CompleteCallback, ErrorCallback } from './handlers/BaseHandler.uts'
+export { M3u8Handler } from './handlers/M3u8Handler.uts'

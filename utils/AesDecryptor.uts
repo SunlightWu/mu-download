@@ -1,0 +1,98 @@
+/**
+ * AES-128-CBC 解密工具
+ * 用于解密 HLS/M3U8 加密的 TS 分片
+ */
+
+// #ifdef APP-ANDROID
+import Cipher from 'javax.crypto.Cipher'
+import SecretKeySpec from 'javax.crypto.spec.SecretKeySpec'
+import IvParameterSpec from 'javax.crypto.spec.IvParameterSpec'
+
+/**
+ * 解密 TS 分片文件
+ */
+export function decryptTsFile(encryptedPath : string, decryptedPath : string, key : ByteArray, iv : ByteArray) : boolean {
+	try {
+		const realEncPath = UTSAndroid.convert2AbsFullPath(encryptedPath)
+		const realDecPath = UTSAndroid.convert2AbsFullPath(decryptedPath)
+		
+		// 读取加密文件
+		const encFile = new java.io.File(realEncPath)
+		const fis = new java.io.FileInputStream(encFile)
+		const encryptedData = ByteArray(encFile.length().toInt())
+		fis.read(encryptedData)
+		fis.close()
+		
+		// AES 解密
+		const secretKey = new SecretKeySpec(key, "AES")
+		const ivSpec = new IvParameterSpec(iv)
+		const cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+		cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+		
+		const decryptedData = cipher.doFinal(encryptedData)
+		
+		// 写入解密文件
+		const decFile = new java.io.File(realDecPath)
+		const fos = new java.io.FileOutputStream(decFile)
+		fos.write(decryptedData)
+		fos.close()
+		
+		// 删除加密文件
+		encFile.delete()
+		
+		return true
+	} catch (e : Exception) {
+		console.error('解密失败', e)
+		return false
+	}
+}
+
+/**
+ * 将十六进制字符串转换为字节数组
+ */
+export function hexToBytes(hex : string) : ByteArray {
+	const len = hex.length
+	const data = ByteArray(len / 2)
+	var i = 0
+	while (i < len) {
+		const hexStr = hex.substring(i, i + 2)
+		const byteVal = java.lang.Integer.parseInt(hexStr, 16).toByte()
+		const idx = Math.floor(i / 2).toInt()
+		data[idx] = byteVal
+		i += 2
+	}
+	return data
+}
+
+/**
+ * 根据分片序号生成默认 IV
+ * 当 M3U8 没有指定 IV 时，使用分片序号作为 IV
+ */
+export function generateDefaultIv(segmentIndex : number) : ByteArray {
+	const iv = ByteArray(16)
+	const index = segmentIndex.toLong()
+	// 将序号写入 IV 的最后 8 字节（大端序）
+	for (let i = 0; i < 8; i++) {
+		const shift = i * 8
+		const byteVal = (index.ushr(shift).and(0xFF.toLong())).toByte()
+		const idx = (15 - i).toInt()
+		iv[idx] = byteVal
+	}
+	return iv
+}
+// #endif
+
+// #ifndef APP-ANDROID
+export function decryptTsFile(encryptedPath : string, decryptedPath : string, key : ArrayBuffer, iv : ArrayBuffer) : boolean {
+	console.log('decryptTsFile not supported', encryptedPath, decryptedPath)
+	return false
+}
+
+export function hexToBytes(hex : string) : ArrayBuffer {
+	return new ArrayBuffer(hex.length / 2)
+}
+
+export function generateDefaultIv(segmentIndex : number) : ArrayBuffer {
+	return new ArrayBuffer(16)
+}
+// #endif

@@ -1,0 +1,163 @@
+/**
+ * M3U8 解析器
+ * 解析 M3U8 文件内容，提取 TS 分片信息
+ */
+import { SegmentInfo, M3u8ParseResult } from '../types.uts'
+import { BaseParser } from './BaseParser.uts'
+
+export class M3u8Parser extends BaseParser {
+	private keyUrl : string = ''
+	private isEncrypted : boolean = false
+	private iv : string = ''
+	
+	constructor(baseUrl : string) {
+		super(baseUrl)
+	}
+	
+	/**
+	 * 解析 M3U8 内容
+	 */
+	override parse(content : string) : SegmentInfo[] {
+		const segments : SegmentInfo[] = []
+		const lines = content.split('\n')
+		
+		let currentDuration : number = 0
+		let segmentIndex : number = 0
+		
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i].trim()
+			
+			if (line.length == 0 || line.startsWith('#EXTM3U')) {
+				continue
+			}
+			
+			// 解析加密信息
+			if (line.startsWith('#EXT-X-KEY')) {
+				this.parseKeyInfo(line)
+				continue
+			}
+			
+			// 解析分片时长
+			if (line.startsWith('#EXTINF:')) {
+				const durationStr = line.substring(8).split(',')[0]
+				currentDuration = parseFloat(durationStr)
+				continue
+			}
+			
+			// 跳过其他标签
+			if (line.startsWith('#')) {
+				continue
+			}
+			
+			// 这是一个分片URL
+			if (line.length > 0) {
+				const segment : SegmentInfo = {
+					index: segmentIndex,
+					url: this.resolveUrl(line),
+					duration: currentDuration,
+					downloaded: false,
+					localPath: ''
+				}
+				segments.push(segment)
+				segmentIndex++
+				currentDuration = 0
+			}
+		}
+		
+		return segments
+	}
+	
+	/**
+	 * 完整解析，返回更多信息
+	 */
+	parseComplete(content : string) : M3u8ParseResult {
+		const segments = this.parse(content)
+		
+		let totalDuration : number = 0
+		for (let i = 0; i < segments.length; i++) {
+			totalDuration += segments[i].duration
+		}
+		
+		return {
+			segments: segments,
+			totalDuration: totalDuration,
+			isEncrypted: this.isEncrypted,
+			keyUrl: this.keyUrl,
+			iv: this.iv
+		}
+	}
+	
+	/**
+	 * 解析加密密钥信息
+	 */
+	private parseKeyInfo(line : string) : void {
+		if (line.indexOf('METHOD=AES-128') != -1) {
+			this.isEncrypted = true
+			
+			// 解析密钥 URI
+			const uriMatch = line.match(/URI="([^"]+)"/)
+			if (uriMatch != null && uriMatch.length > 1) {
+				const uri = uriMatch[1]
+				if (uri != null) {
+					this.keyUrl = this.resolveUrl(uri)
+				}
+			}
+			
+			// 解析 IV（初始化向量）
+			const ivMatch = line.match(/IV=0x([0-9a-fA-F]+)/)
+			if (ivMatch != null && ivMatch.length > 1) {
+				const ivHex = ivMatch[1]
+				if (ivHex != null) {
+					this.iv = ivHex
+				}
+			}
+		}
+	}
+	
+	/**
+	 * 检查是否为主播放列表（包含多个清晰度）
+	 */
+	static isMasterPlaylist(content : string) : boolean {
+		return content.indexOf('#EXT-X-STREAM-INF') != -1
+	}
+	
+	/**
+	 * 解析主播放列表，获取各清晰度地址
+	 */
+	parseMasterPlaylist(content : string) : Map<string, string> {
+		const playlists = new Map<string, string>()
+		const lines = content.split('\n')
+		
+		let currentResolution : string = ''
+		
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i].trim()
+			
+			if (line.startsWith('#EXT-X-STREAM-INF')) {
+				const resMatch = line.match(/RESOLUTION=(\d+x\d+)/)
+				if (resMatch != null && resMatch.length > 1) {
+					const res = resMatch[1]
+					if (res != null) {
+						currentResolution = res
+					}
+				} else {
+					const bwMatch = line.match(/BANDWIDTH=(\d+)/)
+					if (bwMatch != null && bwMatch.length > 1) {
+						const bw = bwMatch[1]
+						if (bw != null) {
+							currentResolution = `${bw}bps`
+						}
+					}
+				}
+				continue
+			}
+			
+			if (!line.startsWith('#') && line.length > 0 && currentResolution.length > 0) {
+				playlists.set(currentResolution, this.resolveUrl(line))
+				currentResolution = ''
+			}
+		}
+		
+		return playlists
+	}
+}

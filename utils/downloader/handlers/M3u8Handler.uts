@@ -1,0 +1,302 @@
+/**
+ * M3U8 下载处理器
+ * 处理 M3U8 视频流的下载、合并
+ */
+import { DownloadTask } from '../core/DownloadTask.uts'
+import { BaseHandler } from './BaseHandler.uts'
+import { M3u8Parser } from '../parsers/M3u8Parser.uts'
+import { SegmentInfo } from '../types.uts'
+
+export class M3u8Handler extends BaseHandler {
+	private activeDownloads : number = 0
+	private tempDir : string = ''
+	
+	constructor(task : DownloadTask) {
+		super(task)
+	}
+	
+	/**
+	 * 开始下载
+	 */
+	override start() : void {
+		if (this.isRunning) {
+			return
+		}
+		
+		this.isRunning = true
+		this.isPaused = false
+		this.task.status = 'downloading'
+		
+		// 初始化临时目录
+		this.initTempDir()
+		
+		// 如果还没有解析分片，先解析 M3U8
+		if (this.task.segments.length == 0) {
+			this.fetchAndParseM3u8()
+		} else {
+			// 断点续传，直接开始下载
+			this.startSegmentDownload()
+		}
+	}
+	
+	/**
+	 * 初始化临时目录
+	 */
+	private initTempDir() : void {
+		// #ifdef APP-ANDROID
+		this.tempDir = `${uni.env.CACHE_PATH}/${this.task.id}`
+		// #endif
+		// #ifdef APP-IOS
+		this.tempDir = `${uni.env.CACHE_PATH}/${this.task.id}`
+		// #endif
+		// #ifndef APP-ANDROID || APP-IOS
+		this.tempDir = `_downloads/${this.task.id}`
+		// #endif
+		
+		// 创建临时目录
+		try {
+			uni.getFileSystemManager().mkdirSync(this.tempDir, true)
+		} catch (e) {
+			// 目录可能已存在
+		}
+	}
+	
+	/**
+	 * 获取并解析 M3U8 文件
+	 */
+	private fetchAndParseM3u8() : void {
+		uni.request({
+			url: this.task.config.url,
+			method: 'GET',
+			header: this.task.config.headers != null ? this.task.config.headers!.toMap() : {},
+			success: (res) => {
+				const content = res.data as string
+				
+				// 检查是否为主播放列表
+				if (M3u8Parser.isMasterPlaylist(content)) {
+					this.handleMasterPlaylist(content)
+				} else {
+					this.parseAndDownload(content)
+				}
+			},
+			fail: (err) => {
+				this.notifyError(`获取M3U8文件失败: ${err.errMsg}`)
+			}
+		})
+	}
+	
+	/**
+	 * 处理主播放列表（多清晰度）
+	 */
+	private handleMasterPlaylist(content : string) : void {
+		const parser = new M3u8Parser(this.task.config.url)
+		const playlists = parser.parseMasterPlaylist(content)
+		
+		// 默认选择最高清晰度
+		let selectedUrl : string = ''
+		let maxBandwidth : number = 0
+		
+		playlists.forEach((url, resolution) => {
+			const bw = this.extractBandwidth(resolution)
+			if (bw > maxBandwidth) {
+				maxBandwidth = bw
+				selectedUrl = url
+			}
+		})
+		
+		if (selectedUrl.length > 0) {
+			// 获取子播放列表
+			uni.request({
+				url: selectedUrl,
+				method: 'GET',
+				success: (res) => {
+					this.parseAndDownload(res.data as string)
+				},
+				fail: (err) => {
+					this.notifyError(`获取子播放列表失败: ${err.errMsg}`)
+				}
+			})
+		} else {
+			this.notifyError('未找到可用的播放列表')
+		}
+	}
+	
+	/**
+	 * 解析并开始下载
+	 */
+	private parseAndDownload(content : string) : void {
+		const parser = new M3u8Parser(this.task.config.url)
+		const segments = parser.parse(content)
+		
+		if (segments.length == 0) {
+			this.notifyError('M3U8文件中未找到分片')
+			return
+		}
+		
+		this.task.segments = segments
+		this.startSegmentDownload()
+	}
+	
+	/**
+	 * 开始分片下载
+	 */
+	private startSegmentDownload() : void {
+		const pendingSegments = this.task.getPendingSegments()
+		
+		if (pendingSegments.length == 0) {
+			// 所有分片已下载，开始合并
+			this.mergeSegments()
+			return
+		}
+		
+		this.notifyProgress()
+		
+		// 启动并发下载
+		const concurrency = this.task.config.concurrency
+		for (let i = 0; i < concurrency && i < pendingSegments.length; i++) {
+			this.downloadNextSegment()
+		}
+	}
+	
+	/**
+	 * 下载下一个分片
+	 */
+	private downloadNextSegment() : void {
+		if (!this.isRunning || this.isPaused) {
+			return
+		}
+		
+		const pendingSegments = this.task.getPendingSegments()
+		if (pendingSegments.length == 0) {
+			// 检查是否所有下载都完成
+			if (this.activeDownloads == 0) {
+				this.mergeSegments()
+			}
+			return
+		}
+		
+		// 找到第一个未在下载中的分片
+		const segment = pendingSegments[0]
+		this.activeDownloads++
+		
+		const savePath = `${this.tempDir}/${segment.index}.ts`
+		
+		uni.downloadFile({
+			url: segment.url,
+			filePath: savePath,
+			header: this.task.config.headers != null ? this.task.config.headers!.toMap() : {},
+			success: (_) => {
+				this.task.markSegmentCompleted(segment.index, savePath)
+				this.notifyProgress()
+				
+				this.activeDownloads--
+				this.downloadNextSegment()
+			},
+			fail: (err) => {
+				console.error(`分片 ${segment.index} 下载失败: ${err.errMsg}`)
+				this.activeDownloads--
+				
+				// 重试逻辑可以在这里添加
+				this.downloadNextSegment()
+			}
+		})
+	}
+	
+	/**
+	 * 合并分片
+	 */
+	private mergeSegments() : void {
+		if (!this.task.isAllCompleted()) {
+			this.notifyError('部分分片下载失败，无法合并')
+			return
+		}
+		
+		this.task.status = 'merging'
+		this.notifyProgress()
+		
+		const outputPath = `${this.task.config.savePath}/${this.task.config.fileName}.mp4`
+		
+		// 获取所有分片路径（按顺序）
+		const segments = this.task.segments
+		const filePaths : string[] = []
+		for (let i = 0; i < segments.length; i++) {
+			filePaths.push(segments[i].localPath)
+		}
+		
+		// 合并文件
+		this.mergeFiles(filePaths, outputPath)
+	}
+	
+	/**
+	 * 合并多个文件
+	 */
+	private mergeFiles(inputPaths : string[], outputPath : string) : void {
+		const fs = uni.getFileSystemManager()
+		
+		// 确保输出目录存在
+		const outputDir = outputPath.substring(0, outputPath.lastIndexOf('/'))
+		try {
+			fs.mkdirSync(outputDir, true)
+		} catch (e) {
+			// 目录可能已存在
+		}
+		
+		// 逐个读取并写入
+		let isFirst = true
+		let hasError = false
+		
+		for (let i = 0; i < inputPaths.length; i++) {
+			if (hasError) break
+			
+			try {
+				const data = fs.readFileSync(inputPaths[i])
+				
+				if (isFirst) {
+					fs.writeFileSync(outputPath, data)
+					isFirst = false
+				} else {
+					fs.appendFileSync(outputPath, data)
+				}
+			} catch (e) {
+				hasError = true
+				this.notifyError(`合并文件失败: ${e}`)
+			}
+		}
+		
+		if (!hasError) {
+			// 清理临时文件
+			this.cleanupTempFiles()
+			
+			this.task.status = 'completed'
+			this.isRunning = false
+			this.notifyComplete(outputPath)
+		}
+	}
+	
+	/**
+	 * 清理临时文件
+	 */
+	private cleanupTempFiles() : void {
+		try {
+			const fs = uni.getFileSystemManager()
+			fs.rmdirSync(this.tempDir, true)
+		} catch (e) {
+			console.error('清理临时文件失败', e)
+		}
+	}
+	
+	/**
+	 * 提取带宽数值
+	 */
+	private extractBandwidth(resolution : string) : number {
+		if (resolution.endsWith('bps')) {
+			return parseInt(resolution.replace('bps', ''))
+		}
+		// 从分辨率估算
+		const parts = resolution.split('x')
+		if (parts.length == 2) {
+			return parseInt(parts[0]) * parseInt(parts[1])
+		}
+		return 0
+	}
+}

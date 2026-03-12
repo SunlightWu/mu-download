@@ -1,0 +1,143 @@
+/**
+ * 文件操作帮助类
+ */
+
+// #ifdef APP-ANDROID
+/**
+ * 复制文件到公共目录 (Android)
+ */
+export function copyToPublicDirectory(srcPath : string, destPath : string) : boolean {
+	try {
+		const realSrcPath = UTSAndroid.convert2AbsFullPath(srcPath)
+		
+		const destFile = new java.io.File(destPath)
+		const parentDir = destFile.getParentFile()
+		if (parentDir != null && !parentDir.exists()) {
+			parentDir.mkdirs()
+		}
+		
+		const srcFile = new java.io.File(realSrcPath)
+		const fis = new java.io.FileInputStream(srcFile)
+		const fos = new java.io.FileOutputStream(destFile)
+		
+		const buffer = ByteArray(8192)
+		var bytesRead : Int
+		while (true) {
+			bytesRead = fis.read(buffer)
+			if (bytesRead == -1) break
+			fos.write(buffer, 0, bytesRead)
+		}
+		
+		fis.close()
+		fos.close()
+		srcFile.delete()
+		
+		return true
+	} catch (e : Exception) {
+		console.error('复制文件失败', e)
+		return false
+	}
+}
+
+/**
+ * 删除目录及其内容 (Android)
+ */
+export function deleteDirectory(dirPath : string) : void {
+	try {
+		const realPath = UTSAndroid.convert2AbsFullPath(dirPath)
+		const dir = new java.io.File(realPath)
+		
+		if (dir.exists() && dir.isDirectory()) {
+			const files = dir.listFiles()
+			if (files != null) {
+				for (let i : Int = 0; i < files.size; i++) {
+					const file = files[i]
+					if (file.isDirectory()) {
+						deleteDirectoryRecursive(file)
+					} else {
+						file.delete()
+					}
+				}
+			}
+			dir.delete()
+		}
+	} catch (e : Exception) {
+		console.error('删除目录失败', e)
+	}
+}
+
+/**
+ * 递归删除目录
+ */
+function deleteDirectoryRecursive(dir : java.io.File) : void {
+	if (dir.isDirectory()) {
+		const files = dir.listFiles()
+		if (files != null) {
+			for (let i : Int = 0; i < files.size; i++) {
+				deleteDirectoryRecursive(files[i])
+			}
+		}
+	}
+	dir.delete()
+}
+
+/**
+ * 打开视频文件 (Android)
+ */
+export function openVideoFile(filePath : string) : void {
+	try {
+		const file = new java.io.File(filePath)
+		const context = UTSAndroid.getAppContext()
+		
+		if (context != null) {
+			// 让系统媒体库扫描文件
+			android.media.MediaScannerConnection.scanFile(
+				context,
+				arrayOf(filePath),
+				arrayOf("video/mp4"),
+				null
+			)
+			
+			const intent = new android.content.Intent(android.content.Intent.ACTION_VIEW)
+			intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+			intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+			
+			if (android.os.Build.VERSION.SDK_INT >= 24) {
+				const authority = context.getPackageName() + ".fileprovider"
+				const contentUri = androidx.core.content.FileProvider.getUriForFile(context, authority, file)
+				intent.setDataAndType(contentUri, "video/*")
+			} else {
+				const uri = android.net.Uri.fromFile(file)
+				intent.setDataAndType(uri, "video/*")
+			}
+			
+			context.startActivity(intent)
+		}
+	} catch (e : Exception) {
+		console.error('打开文件失败', e)
+		uni.showToast({
+			title: '请用播放器打开文件',
+			icon: 'none'
+		})
+	}
+}
+// #endif
+
+// #ifndef APP-ANDROID
+export function copyToPublicDirectory(srcPath : string, destPath : string) : boolean {
+	console.log('copyToPublicDirectory', srcPath, destPath)
+	return true
+}
+
+export function deleteDirectory(dirPath : string) : void {
+	console.log('deleteDirectory', dirPath)
+}
+
+export function openVideoFile(filePath : string) : void {
+	console.log('openVideoFile', filePath)
+	uni.showToast({
+		title: '请在文件管理器中打开',
+		icon: 'none'
+	})
+}
+// #endif

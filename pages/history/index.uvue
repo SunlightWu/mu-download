@@ -1,0 +1,218 @@
+<template>
+	<view class="container">
+		<scroll-view class="task-list" scroll-y>
+			<view v-if="tasks.length === 0" class="empty-tip">
+				<text class="empty-text">暂无下载记录</text>
+			</view>
+			
+			<view 
+				v-for="task in tasks" 
+				:key="task.id" 
+				class="task-item"
+				@click="goToDetail(task.id)"
+			>
+				<view class="task-info">
+					<text class="task-name">{{ task.fileName }}</text>
+					<text class="task-status" :class="'status-' + task.statusKey">
+						{{ task.status }}
+					</text>
+				</view>
+				<view class="task-detail">
+					<text class="task-url">{{ task.url }}</text>
+				</view>
+				<view class="task-actions">
+					<text class="action-delete" @click.stop="onDeleteTask(task.id)">删除</text>
+				</view>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+	type TaskItem = {
+		id : string
+		fileName : string
+		url : string
+		status : string
+		statusKey : string
+	}
+	
+	const tasks = ref<TaskItem[]>([])
+	
+	const getStatusKey = (status : string) : string => {
+		if (status.indexOf('下载中') != -1) return 'downloading'
+		if (status.indexOf('完成') != -1) return 'completed'
+		if (status.indexOf('失败') != -1) return 'failed'
+		if (status.indexOf('暂停') != -1) return 'paused'
+		return 'pending'
+	}
+	
+	const loadTaskList = () : void => {
+		try {
+			const data = uni.getStorageSync('download_tasks') as string
+			if (data.length > 0) {
+				const parsed = JSON.parseArray(data)
+				if (parsed != null) {
+					const list : TaskItem[] = []
+					for (let i = 0; i < parsed.length; i++) {
+						const t = parsed[i] as UTSJSONObject
+						const config = t.getJSON('config')
+						if (config != null) {
+							list.push({
+								id: config.getString('id') ?? '',
+								fileName: config.getString('fileName') ?? '',
+								url: config.getString('url') ?? '',
+								status: t.getString('status') ?? '',
+								statusKey: getStatusKey(t.getString('status') ?? '')
+							})
+						}
+					}
+					tasks.value = list
+				}
+			}
+		} catch (e) {
+			console.error('加载任务失败', e)
+		}
+	}
+	
+	const removeTask = (taskId : string) : void => {
+		try {
+			const data = uni.getStorageSync('download_tasks') as string
+			if (data.length > 0) {
+				const parsed = JSON.parseArray(data)
+				if (parsed != null) {
+					const newList : UTSJSONObject[] = []
+					for (let i = 0; i < parsed.length; i++) {
+						const t = parsed[i] as UTSJSONObject
+						const config = t.getJSON('config')
+						if (config != null && config.getString('id') != taskId) {
+							newList.push(t)
+						}
+					}
+					uni.setStorageSync('download_tasks', JSON.stringify(newList))
+					loadTaskList()
+				}
+			}
+		} catch (e) {
+			console.error('删除失败', e)
+		}
+	}
+	
+	const goToDetail = (taskId : string) : void => {
+		uni.navigateTo({
+			url: `/pages/m3u8/detail?taskId=${taskId}`
+		})
+	}
+	
+	const onDeleteTask = (taskId : string) : void => {
+		uni.showModal({
+			title: '确认删除',
+			content: '确定要删除该下载记录吗？',
+			success: (res) => {
+				if (res.confirm) {
+					removeTask(taskId)
+				}
+			}
+		})
+	}
+	
+	onShow(() => {
+		loadTaskList()
+	})
+</script>
+
+<style>
+	.container {
+		flex: 1;
+		background-color: #f5f5f5;
+	}
+	
+	.task-list {
+		flex: 1;
+		padding: 20rpx;
+	}
+	
+	.empty-tip {
+		padding: 100rpx;
+		align-items: center;
+	}
+	
+	.empty-text {
+		font-size: 28rpx;
+		color: #999999;
+	}
+	
+	.task-item {
+		background-color: #ffffff;
+		border-radius: 16rpx;
+		padding: 24rpx;
+		margin-bottom: 16rpx;
+	}
+	
+	.task-info {
+		flex-direction: row;
+		justify-content: space-between;
+		align-items: center;
+	}
+	
+	.task-name {
+		font-size: 30rpx;
+		font-weight: bold;
+		color: #333333;
+		flex: 1;
+	}
+	
+	.task-status {
+		font-size: 24rpx;
+		padding: 4rpx 16rpx;
+		border-radius: 8rpx;
+	}
+	
+	.status-pending {
+		background-color: #e0e0e0;
+		color: #666666;
+	}
+	
+	.status-downloading {
+		background-color: #e3f2fd;
+		color: #1976d2;
+	}
+	
+	.status-paused {
+		background-color: #fff3e0;
+		color: #f57c00;
+	}
+	
+	.status-completed {
+		background-color: #e8f5e9;
+		color: #388e3c;
+	}
+	
+	.status-failed {
+		background-color: #ffebee;
+		color: #d32f2f;
+	}
+	
+	.task-detail {
+		margin-top: 12rpx;
+	}
+	
+	.task-url {
+		font-size: 24rpx;
+		color: #999999;
+		lines: 1;
+		text-overflow: ellipsis;
+	}
+	
+	.task-actions {
+		margin-top: 16rpx;
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+	
+	.action-delete {
+		font-size: 26rpx;
+		color: #f44336;
+		padding: 8rpx 20rpx;
+	}
+</style>

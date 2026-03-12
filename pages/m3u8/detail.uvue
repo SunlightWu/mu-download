@@ -1,0 +1,1222 @@
+<template>
+	<view class="container">
+		<!-- 信息区域 -->
+		<view class="info-section">
+			<view class="info-row">
+				<text class="info-label">m3u8地址：</text>
+				<text class="info-value">{{ m3u8Url }}</text>
+			</view>
+			
+			<view v-if="isEncrypted" class="info-row">
+				<text class="info-label">加密：</text>
+				<text class="info-value">AES-128</text>
+			</view>
+			
+			<view class="info-row">
+				<text class="info-label">文件数量：</text>
+				<text class="info-value">{{ totalSegments }}个分片</text>
+			</view>
+			
+			<view class="info-row">
+				<text class="info-label">总时长：</text>
+				<text class="info-value">{{ formatDuration(totalDuration) }}</text>
+			</view>
+		</view>
+		
+		<!-- 进度区域 -->
+		<view class="progress-section">
+			<view class="progress-header">
+				<text class="progress-title">{{ statusText }}</text>
+				<text class="progress-percent">{{ progressPercent }}%</text>
+			</view>
+			
+			<view class="progress-bar-bg">
+				<view class="progress-bar-fill" :style="{ width: progressPercent + '%' }"></view>
+			</view>
+			
+			<view class="progress-stats">
+				<text class="stats-item">{{ downloadedCount }}/{{ totalSegments }}</text>
+				<text class="stats-item" v-if="failedCount > 0" style="color: #f44336;">失败: {{ failedCount }}</text>
+			</view>
+		</view>
+		
+		<!-- 设置区域 -->
+		<view class="settings-section">
+			<view class="setting-row">
+				<text class="setting-label">并发线程数</text>
+				<view class="setting-control">
+					<text class="control-btn" @click="decreaseConcurrency">-</text>
+					<input 
+						class="control-input"
+						type="number"
+						v-model="concurrencyInput"
+						@blur="onConcurrencyBlur"
+					/>
+					<text class="control-btn" @click="increaseConcurrency">+</text>
+				</view>
+			</view>
+		</view>
+		
+		<!-- 文件名设置区域（下载完成后显示） -->
+		<view v-if="canMerge" class="filename-section">
+			<text class="filename-label">导出文件名</text>
+			<view class="filename-input-wrapper">
+				<input 
+					class="filename-input"
+					v-model="exportFileName"
+					placeholder="请输入文件名"
+					placeholder-class="placeholder"
+				/>
+				<text class="filename-ext">.mp4</text>
+			</view>
+		</view>
+		
+		<!-- 已导出状态显示 -->
+		<view v-if="isExported" class="exported-section">
+			<text class="exported-title">导出完成</text>
+			<text class="exported-path">{{ exportedPath }}</text>
+		</view>
+		
+		<!-- 操作按钮 -->
+		<view class="action-section">
+			<button 
+				v-if="!isExported"
+				class="action-btn" 
+				:class="isDownloading ? 'btn-pause' : 'btn-start'"
+				@click="onStartDownload"
+			>
+				<text class="btn-text">{{ getDownloadBtnText() }}</text>
+			</button>
+			
+			<button 
+				v-if="isExported"
+				class="action-btn btn-start"
+				@click="onStartNewDownload"
+			>
+				<text class="btn-text">重新下载</text>
+			</button>
+			
+			<button 
+				v-if="failedCount > 0"
+				class="action-btn btn-retry"
+				@click="onRetryFailed"
+			>
+				<text class="btn-text">重下失败项({{ failedCount }})</text>
+			</button>
+			
+			<button 
+				v-if="canMerge"
+				class="action-btn btn-merge"
+				@click="onMergeExport"
+			>
+				<text class="btn-text">合并导出视频</text>
+			</button>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+	import { M3u8Parser } from '@/utils/downloader/parsers/M3u8Parser.uts'
+	import { copyToPublicDirectory, deleteDirectory } from '@/utils/FileHelper.uts'
+	// #ifdef APP-ANDROID
+	import { decryptTsFile, hexToBytes, generateDefaultIv } from '@/utils/AesDecryptor.uts'
+	// #endif
+	
+	// 分片数据
+	type SegmentData = {
+		index : number
+		url : string
+		duration : number
+		status : 'pending' | 'downloading' | 'completed' | 'failed'
+		localPath : string
+		retryCount : number
+	}
+	
+	// 页面数据
+	const m3u8Url = ref('')
+	const keyUrl = ref('')
+	const isEncrypted = ref(false)
+	const encryptionIv = ref('')
+	const totalDuration = ref(0)
+	const totalSegments = ref(0)
+	
+	// 加密密钥（下载后存储）
+	// #ifdef APP-ANDROID
+	let encryptionKey : ByteArray | null = null
+	// #endif
+	
+	// 下载状态
+	const statusText = ref('等待解析')
+	const progressPercent = ref(0)
+	const downloadedCount = ref(0)
+	const downloadedSize = ref<number>(0)
+	const failedCount = ref(0)
+	const isDownloading = ref(false)
+	const canMerge = ref(false)
+	
+	// 导出文件名
+	const exportFileName = ref('')
+	const isMerging = ref(false)
+	const isExported = ref(false)
+	const exportedPath = ref('')
+	
+	// 并发控制
+	const concurrencyCount = ref(10)
+	const concurrencyInput = ref('10')
+	const maxRetry = 3
+	let activeDownloads = 0
+	let isPaused = false
+	let downloadingIndices = new Set<number>()
+	
+	// 分片数据
+	let segments : SegmentData[] = []
+	
+	// 当前任务ID
+	let taskId = ''
+	let tempDir = ''
+	
+	// 保存计数器
+	let saveCounter = 0
+	
+	// 工具函数
+	const padZero = (n : number) : string => {
+		return n < 10 ? `0${n}` : `${n}`
+	}
+	
+	const formatDuration = (seconds : number) : string => {
+		const h = Math.floor(seconds / 3600)
+		const m = Math.floor((seconds % 3600) / 60)
+		const s = Math.floor(seconds % 60)
+		
+		if (h > 0) {
+			return `${h}:${padZero(m)}:${padZero(s)}`
+		}
+		return `${padZero(m)}:${padZero(s)}`
+	}
+	
+	const formatSize = (bytes : number) : string => {
+		if (bytes < 1024) {
+			return `${bytes} B`
+		} else if (bytes < 1024 * 1024) {
+			return `${(bytes / 1024).toFixed(2)} KB`
+		} else if (bytes < 1024 * 1024 * 1024) {
+			return `${(bytes / 1024 / 1024).toFixed(2)} MB`
+		}
+		return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+	}
+	
+	const extractBandwidth = (resolution : string) : number => {
+		if (resolution.endsWith('bps')) {
+			return parseInt(resolution.replace('bps', ''))
+		}
+		const parts = resolution.split('x')
+		if (parts.length == 2) {
+			return parseInt(parts[0]) * parseInt(parts[1])
+		}
+		return 0
+	}
+	
+	// 增加并发数
+	const increaseConcurrency = () : void => {
+		if (concurrencyCount.value < 50) {
+			concurrencyCount.value++
+			concurrencyInput.value = `${concurrencyCount.value}`
+		}
+	}
+	
+	// 减少并发数
+	const decreaseConcurrency = () : void => {
+		if (concurrencyCount.value > 1) {
+			concurrencyCount.value--
+			concurrencyInput.value = `${concurrencyCount.value}`
+		}
+	}
+	
+	// 并发数输入失焦
+	const onConcurrencyBlur = () : void => {
+		let num = parseInt(concurrencyInput.value)
+		if (isNaN(num) || num < 1) {
+			num = 1
+		} else if (num > 50) {
+			num = 50
+		}
+		concurrencyCount.value = num
+		concurrencyInput.value = `${num}`
+	}
+	
+	// 获取下载按钮文字
+	const getDownloadBtnText = () : string => {
+		if (isDownloading.value) {
+			return '暂停下载'
+		} else if (canMerge.value) {
+			return '重新下载'
+		} else {
+			return '开始下载'
+		}
+	}
+	
+	const updateProgress = () : void => {
+		if (totalSegments.value > 0) {
+			progressPercent.value = Math.floor((downloadedCount.value / totalSegments.value) * 100)
+		}
+	}
+	
+	// 初始化临时目录
+	const initTempDir = () : void => {
+		// #ifdef APP-ANDROID
+		tempDir = `${uni.env.CACHE_PATH}/${taskId}`
+		// #endif
+		// #ifdef APP-IOS  
+		tempDir = `${uni.env.CACHE_PATH}/${taskId}`
+		// #endif
+		// #ifndef APP-ANDROID || APP-IOS
+		tempDir = `_downloads/${taskId}`
+		// #endif
+		
+		try {
+			uni.getFileSystemManager().mkdirSync(tempDir, true)
+		} catch (e) {}
+	}
+	
+	// 删除任务
+	const deleteTask = () : void => {
+		try {
+			const data = uni.getStorageSync('download_tasks') as string
+			if (data.length > 0) {
+				const parsed = JSON.parseArray(data)
+				if (parsed != null) {
+					const newTasks : UTSJSONObject[] = []
+					for (let i = 0; i < parsed.length; i++) {
+						const t = parsed[i] as UTSJSONObject
+						const config = t.getJSON('config')
+						if (config != null && config.getString('id') != taskId) {
+							newTasks.push(t)
+						}
+					}
+					uni.setStorageSync('download_tasks', JSON.stringify(newTasks))
+				}
+			}
+		} catch (e) {}
+	}
+	
+	// 保存任务
+	const saveTask = () : void => {
+		try {
+			let tasks : UTSJSONObject[] = []
+			const data = uni.getStorageSync('download_tasks') as string
+			if (data.length > 0) {
+				const parsed = JSON.parseArray(data)
+				if (parsed != null) {
+					for (let i = 0; i < parsed.length; i++) {
+						tasks.push(parsed[i] as UTSJSONObject)
+					}
+				}
+			}
+			
+			const segData : UTSJSONObject[] = []
+			for (let i = 0; i < segments.length; i++) {
+				const segObj : UTSJSONObject = {
+					index: segments[i].index,
+					url: segments[i].url,
+					duration: segments[i].duration,
+					downloaded: segments[i].status == 'completed',
+					localPath: segments[i].localPath,
+					retryCount: segments[i].retryCount
+				}
+				segData.push(segObj)
+			}
+			
+			const taskData : UTSJSONObject = {
+				config: {
+					id: taskId,
+					url: m3u8Url.value,
+					fileName: `video_${taskId.substring(5, 13)}`,
+					type: 'm3u8'
+				},
+				status: statusText.value,
+				segments: segData,
+				downloadedSize: downloadedSize.value
+			}
+			
+			let found = false
+			for (let i = 0; i < tasks.length; i++) {
+				const config = tasks[i].getJSON('config')
+				if (config != null && config.getString('id') == taskId) {
+					tasks[i] = taskData
+					found = true
+					break
+				}
+			}
+			
+			if (!found) {
+				tasks.unshift(taskData)
+			}
+			
+			uni.setStorageSync('download_tasks', JSON.stringify(tasks))
+		} catch (e) {
+			console.error('保存任务失败', e)
+		}
+	}
+	
+	const saveTaskIfNeeded = () : void => {
+		saveCounter++
+		if (saveCounter >= 20) {
+			saveCounter = 0
+			saveTask()
+		}
+	}
+	
+	// 当前合并状态
+	let mergeOutputPath = ''
+	let mergePublicPath = ''
+	let mergeIndex = 0
+	let mergeIsFirst = true
+	
+	// 合并完成后的处理
+	function onMergeComplete() : void {
+		statusText.value = '正在导出...'
+		
+		// #ifdef APP-ANDROID
+		// 复制到公共目录
+		const success = copyToPublicDirectory(mergeOutputPath, mergePublicPath)
+		
+		if (success) {
+			// 清理临时目录
+			deleteDirectory(tempDir)
+			
+			uni.hideLoading()
+			isMerging.value = false
+			statusText.value = '导出完成'
+			progressPercent.value = 100
+			canMerge.value = false
+			isExported.value = true
+			exportedPath.value = mergePublicPath
+			deleteTask()
+			
+			uni.showModal({
+				title: '导出成功',
+				content: `视频已保存到:\nDownload/M3U8Videos/${exportFileName.value}.mp4`,
+				showCancel: false
+			})
+		} else {
+			uni.hideLoading()
+			isMerging.value = false
+			statusText.value = '导出失败'
+			uni.showModal({
+				title: '导出失败',
+				content: '无法写入公共目录，请检查存储权限',
+				confirmText: '去设置',
+				success: (res) => {
+					if (res.confirm) {
+						uni.openAppAuthorizeSetting({})
+					}
+				}
+			})
+		}
+		// #endif
+		
+		// #ifndef APP-ANDROID
+		// 非Android平台：直接完成
+		const fs = uni.getFileSystemManager()
+		try {
+			fs.rmdirSync(tempDir, true)
+		} catch (e) {}
+		
+		uni.hideLoading()
+		isMerging.value = false
+		statusText.value = '导出完成'
+		progressPercent.value = 100
+		canMerge.value = false
+		isExported.value = true
+		exportedPath.value = mergeOutputPath
+		deleteTask()
+		
+		uni.showModal({
+			title: '导出成功',
+			content: `文件已保存到:\n${mergeOutputPath}`,
+			showCancel: false
+		})
+		// #endif
+	}
+	
+	// 合并下一个分片
+	function mergeNextSegment() : void {
+		if (mergeIndex >= segments.length) {
+			onMergeComplete()
+			return
+		}
+		
+		const fs = uni.getFileSystemManager()
+		
+		try {
+			const data = fs.readFileSync(segments[mergeIndex].localPath, 'base64')
+			
+			if (mergeIsFirst) {
+				fs.writeFileSync(mergeOutputPath, data, 'base64')
+				mergeIsFirst = false
+			} else {
+				fs.appendFileSync(mergeOutputPath, data, 'base64')
+			}
+			
+			mergeIndex++
+			const percent = Math.floor((mergeIndex / segments.length) * 100)
+			progressPercent.value = percent
+			statusText.value = `合并中 ${percent}%`
+			
+			// 继续下一个分片（异步）
+			setTimeout(() => {
+				mergeNextSegment()
+			}, 1)
+		} catch (e) {
+			console.error('合并分片失败', e)
+			uni.hideLoading()
+			isMerging.value = false
+			statusText.value = '合并失败'
+			uni.showToast({
+				title: '合并失败',
+				icon: 'none'
+			})
+		}
+	}
+	
+	// 开始合并（异步递归方式，避免阻塞UI）
+	function mergeFilesToPublic(outputPath : string, publicPath : string) : void {
+		mergeOutputPath = outputPath
+		mergePublicPath = publicPath
+		mergeIndex = 0
+		mergeIsFirst = true
+		
+		statusText.value = '合并中 0%'
+		
+		// 开始异步合并
+		setTimeout(() => {
+			mergeNextSegment()
+		}, 50)
+	}
+	
+	// 检查下载完成
+	const checkDownloadComplete = () : void => {
+		let allCompleted = true
+		let failed = 0
+		
+		for (let i = 0; i < segments.length; i++) {
+			if (segments[i].status != 'completed') {
+				allCompleted = false
+				if (segments[i].status == 'failed') {
+					failed++
+				}
+			}
+		}
+		
+		failedCount.value = failed
+		
+		if (allCompleted) {
+			statusText.value = '下载完成'
+			isDownloading.value = false
+			canMerge.value = true
+		} else if (failed > 0 && !isPaused) {
+			statusText.value = `完成，${failed}个失败`
+			isDownloading.value = false
+			canMerge.value = (failed == 0)
+		}
+		
+		saveTask()
+	}
+	
+	// 下载分片
+	function downloadNextSegment() : void {
+		if (isPaused) return
+		
+		let nextIndex = -1
+		for (let i = 0; i < segments.length; i++) {
+			if (segments[i].status == 'pending' && !downloadingIndices.has(i)) {
+				nextIndex = i
+				break
+			}
+		}
+		
+		if (nextIndex == -1) {
+			if (activeDownloads == 0) {
+				checkDownloadComplete()
+			}
+			return
+		}
+		
+		activeDownloads++
+		downloadingIndices.add(nextIndex)
+		segments[nextIndex].status = 'downloading'
+		
+		const segment = segments[nextIndex]
+		const savePath = `${tempDir}/${segment.index}.ts`
+		const segIndex = nextIndex
+		
+		const downloadTask = uni.downloadFile({
+			url: segment.url,
+			filePath: savePath,
+			success: (res) => {
+				// 如果是加密的，需要解密
+				// #ifdef APP-ANDROID
+				if (isEncrypted.value && encryptionKey != null) {
+					const decryptedPath = `${tempDir}/${segment.index}_dec.ts`
+					
+					// 获取 IV：如果没有指定 IV，使用分片序号生成
+					let iv : ByteArray
+					if (encryptionIv.value.length > 0) {
+						iv = hexToBytes(encryptionIv.value)
+					} else {
+						iv = generateDefaultIv(segment.index)
+					}
+					
+					const decrypted = decryptTsFile(savePath, decryptedPath, encryptionKey!, iv)
+					
+					if (decrypted) {
+						// 重命名解密文件
+						const decFile = new java.io.File(UTSAndroid.convert2AbsFullPath(decryptedPath))
+						const targetFile = new java.io.File(UTSAndroid.convert2AbsFullPath(savePath))
+						decFile.renameTo(targetFile)
+					} else {
+						console.error('解密失败', segment.index)
+					}
+				}
+				// #endif
+				
+				segments[segIndex].status = 'completed'
+				segments[segIndex].localPath = savePath
+				downloadedCount.value++
+				
+				// 获取下载的文件大小
+				try {
+					const stat = uni.getFileSystemManager().statSync(savePath, false)
+					const fileSize : number = (stat.size as number)
+					downloadedSize.value = downloadedSize.value + fileSize
+				} catch (e) {
+					console.error('获取文件大小失败', e)
+				}
+				
+				updateProgress()
+				saveTaskIfNeeded()
+				
+				activeDownloads--
+				downloadingIndices.delete(segIndex)
+				downloadNextSegment()
+			},
+			fail: (_) => {
+				segments[segIndex].retryCount++
+				
+				if (segments[segIndex].retryCount < maxRetry) {
+					segments[segIndex].status = 'pending'
+				} else {
+					segments[segIndex].status = 'failed'
+					failedCount.value++
+				}
+				
+				updateProgress()
+				activeDownloads--
+				downloadingIndices.delete(segIndex)
+				downloadNextSegment()
+			}
+		})
+	}
+	
+	// 开始下载
+	const startDownloadSegments = () : void => {
+		const threads = concurrencyCount.value
+		for (let i = 0; i < threads; i++) {
+			downloadNextSegment()
+		}
+	}
+	
+	// 下载加密密钥
+	function downloadEncryptionKey(url : string) : void {
+		// #ifdef APP-ANDROID
+		const keyPath = `${tempDir}/key.bin`
+		uni.downloadFile({
+			url: url,
+			filePath: keyPath,
+			success: (_) => {
+				try {
+					const realKeyPath = UTSAndroid.convert2AbsFullPath(keyPath)
+					const keyFile = new java.io.File(realKeyPath)
+					const fis = new java.io.FileInputStream(keyFile)
+					const keyBytes = ByteArray(16)
+					fis.read(keyBytes)
+					fis.close()
+					keyFile.delete()
+					
+					encryptionKey = keyBytes
+					statusText.value = '点击开始下载'
+					saveTask()
+				} catch (e : Exception) {
+					console.error('读取密钥失败', e)
+					statusText.value = '获取密钥失败'
+				}
+			},
+			fail: (err) => {
+				console.error('下载密钥失败', err)
+				statusText.value = '获取密钥失败'
+				uni.showToast({
+					title: '获取密钥失败',
+					icon: 'none'
+				})
+			}
+		})
+		// #endif
+		// #ifndef APP-ANDROID
+		statusText.value = '点击开始下载'
+		saveTask()
+		// #endif
+	}
+	
+	// 解析分片
+	function parseSegments(content : string) : void {
+		const parser = new M3u8Parser(m3u8Url.value)
+		const result = parser.parseComplete(content)
+		
+		keyUrl.value = result.keyUrl
+		isEncrypted.value = result.isEncrypted
+		encryptionIv.value = result.iv
+		totalDuration.value = result.totalDuration
+		totalSegments.value = result.segments.length
+		
+		segments = []
+		for (let i = 0; i < result.segments.length; i++) {
+			const seg = result.segments[i]
+			segments.push({
+				index: seg.index,
+				url: seg.url,
+				duration: seg.duration,
+				status: 'pending',
+				localPath: '',
+				retryCount: 0
+			})
+		}
+		
+		// 如果是加密的，下载密钥
+		if (result.isEncrypted && result.keyUrl.length > 0) {
+			statusText.value = '正在获取密钥...'
+			downloadEncryptionKey(result.keyUrl)
+		} else {
+			statusText.value = '点击开始下载'
+			saveTask()
+		}
+	}
+	
+	// 处理主播放列表
+	const handleMasterPlaylist = (content : string) : void => {
+		const parser = new M3u8Parser(m3u8Url.value)
+		const playlists = parser.parseMasterPlaylist(content)
+		
+		let selectedUrl = ''
+		let maxBw = 0
+		
+		playlists.forEach((url, resolution) => {
+			const bw = extractBandwidth(resolution)
+			if (bw > maxBw) {
+				maxBw = bw
+				selectedUrl = url
+			}
+		})
+		
+		if (selectedUrl.length > 0) {
+			uni.request({
+				url: selectedUrl,
+				method: 'GET',
+				success: (res) => {
+					parseSegments(res.data as string)
+				},
+				fail: (_) => {
+					statusText.value = '解析失败'
+				}
+			})
+		}
+	}
+	
+	// 解析M3U8
+	const parseM3u8 = () : void => {
+		statusText.value = '正在解析...'
+		
+		uni.request({
+			url: m3u8Url.value,
+			method: 'GET',
+			success: (res) => {
+				const content = res.data as string
+				
+				if (M3u8Parser.isMasterPlaylist(content)) {
+					handleMasterPlaylist(content)
+				} else {
+					parseSegments(content)
+				}
+			},
+			fail: (err) => {
+				statusText.value = '解析失败'
+				uni.showToast({
+					title: `获取M3U8失败: ${err.errMsg}`,
+					icon: 'none'
+				})
+			}
+		})
+	}
+	
+	// 加载已有任务
+	const loadExistingTask = () : void => {
+		try {
+			const data = uni.getStorageSync('download_tasks') as string
+			if (data.length > 0) {
+				const parsed = JSON.parseArray(data)
+				if (parsed != null) {
+					for (let i = 0; i < parsed.length; i++) {
+						const t = parsed[i] as UTSJSONObject
+						const config = t.getJSON('config')
+						if (config != null && config.getString('id') == taskId) {
+							m3u8Url.value = config.getString('url') ?? ''
+							initTempDir()
+							
+							const segsArr = t.getArray('segments')
+							segments = []
+							let completed = 0
+							let duration : number = 0
+							
+							if (segsArr != null) {
+								for (let j = 0; j < segsArr.length; j++) {
+									const s = segsArr[j] as UTSJSONObject
+									const isCompleted = s.getBoolean('downloaded') ?? false
+									const segDuration = s.getNumber('duration') ?? 0
+									segments.push({
+										index: (s.getNumber('index') ?? 0).toInt(),
+										url: s.getString('url') ?? '',
+										duration: segDuration,
+										status: isCompleted ? 'completed' : 'pending',
+										localPath: s.getString('localPath') ?? '',
+										retryCount: (s.getNumber('retryCount') ?? 0).toInt()
+									})
+									if (isCompleted) {
+										completed++
+									}
+									duration += segDuration
+								}
+							}
+							
+							totalSegments.value = segments.length
+							totalDuration.value = duration
+							downloadedCount.value = completed
+							downloadedSize.value = t.getNumber('downloadedSize') ?? 0
+							
+							if (completed == segments.length && segments.length > 0) {
+								canMerge.value = true
+								statusText.value = '下载完成'
+							} else {
+								statusText.value = '点击继续下载'
+							}
+							
+							updateProgress()
+							break
+						}
+					}
+				}
+			}
+		} catch (e) {
+			console.error('加载任务失败', e)
+		}
+	}
+	
+	// 开始/暂停/重新下载
+	const onStartDownload = () : void => {
+		if (isDownloading.value) {
+			isPaused = true
+			isDownloading.value = false
+			statusText.value = '已暂停'
+			saveTask()
+		} else if (canMerge.value) {
+			// 重新下载：重置所有状态
+			for (let i = 0; i < segments.length; i++) {
+				segments[i].status = 'pending'
+				segments[i].localPath = ''
+				segments[i].retryCount = 0
+			}
+			downloadedCount.value = 0
+			downloadedSize.value = 0
+			failedCount.value = 0
+			progressPercent.value = 0
+			canMerge.value = false
+			exportFileName.value = ''
+			
+			isPaused = false
+			isDownloading.value = true
+			statusText.value = '下载中...'
+			startDownloadSegments()
+		} else {
+			isPaused = false
+			isDownloading.value = true
+			statusText.value = '下载中...'
+			startDownloadSegments()
+		}
+	}
+	
+	// 重下失败项
+	const onRetryFailed = () : void => {
+		if (failedCount.value == 0) return
+		
+		for (let i = 0; i < segments.length; i++) {
+			if (segments[i].status == 'failed') {
+				segments[i].status = 'pending'
+				segments[i].retryCount = 0
+			}
+		}
+		
+		failedCount.value = 0
+		isPaused = false
+		isDownloading.value = true
+		statusText.value = '下载中...'
+		startDownloadSegments()
+	}
+	
+	// 重新下载（导出后）
+	const onStartNewDownload = () : void => {
+		// 重置所有状态
+		for (let i = 0; i < segments.length; i++) {
+			segments[i].status = 'pending'
+			segments[i].localPath = ''
+			segments[i].retryCount = 0
+		}
+		downloadedCount.value = 0
+		downloadedSize.value = 0
+		failedCount.value = 0
+		progressPercent.value = 0
+		canMerge.value = false
+		exportFileName.value = ''
+		isExported.value = false
+		exportedPath.value = ''
+		
+		// 重新初始化临时目录
+		initTempDir()
+		
+		isPaused = false
+		isDownloading.value = true
+		statusText.value = '下载中...'
+		startDownloadSegments()
+	}
+	
+	// 执行合并导出
+	const doMergeExport = () : void => {
+		// 验证文件名
+		const fileName = exportFileName.value.trim()
+		if (fileName.length == 0) {
+			uni.showToast({
+				title: '请输入导出文件名',
+				icon: 'none'
+			})
+			return
+		}
+		
+		// 验证文件名合法性（不能包含特殊字符）
+		const invalidChars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+		for (let i = 0; i < invalidChars.length; i++) {
+			if (fileName.indexOf(invalidChars[i]) != -1) {
+				uni.showToast({
+					title: '文件名不能包含特殊字符',
+					icon: 'none'
+				})
+				return
+			}
+		}
+		
+		// 显示loading
+		uni.showLoading({
+			title: '正在合并导出...',
+			mask: true
+		})
+		isMerging.value = true
+		
+		// 沙箱内临时合并目录
+		const sandboxDir = `${uni.env.USER_DATA_PATH}/merge_temp`
+		try {
+			uni.getFileSystemManager().mkdirSync(sandboxDir, true)
+		} catch (e) {}
+		const sandboxPath = `${sandboxDir}/${fileName}.mp4`
+		
+		// #ifdef APP-ANDROID
+		// Android 公共下载目录
+		const publicPath = `/storage/emulated/0/Download/M3U8Videos/${fileName}.mp4`
+		// #endif
+		// #ifndef APP-ANDROID
+		const publicPath = sandboxPath
+		// #endif
+		
+		// 延迟执行，确保loading显示
+		setTimeout(() => {
+			mergeFilesToPublic(sandboxPath, publicPath)
+		}, 100)
+	}
+	
+	// 合并导出入口
+	const onMergeExport = () : void => {
+		for (let i = 0; i < segments.length; i++) {
+			if (segments[i].status != 'completed') {
+				uni.showToast({
+					title: '请先完成所有分片下载',
+					icon: 'none'
+				})
+				return
+			}
+		}
+		
+		// 检查加密
+		if (isEncrypted.value) {
+			uni.showModal({
+				title: '提示',
+				content: '该视频已加密(AES-128)，导出后可能无法播放。是否继续？',
+				success: (res) => {
+					if (res.confirm) {
+						doMergeExport()
+					}
+				}
+			})
+			return
+		}
+		
+		doMergeExport()
+	}
+	
+	onLoad((options : OnLoadOptions) => {
+		const url = options['url'] as string | null
+		const existingTaskId = options['taskId'] as string | null
+		
+		if (url != null && url.length > 0) {
+			const decoded = decodeURIComponent(url) ?? ''
+			if (decoded.length > 0) {
+				m3u8Url.value = decoded
+				taskId = `task_${Date.now()}`
+				initTempDir()
+				parseM3u8()
+			}
+		} else if (existingTaskId != null) {
+			taskId = existingTaskId
+			loadExistingTask()
+		}
+	})
+	
+	onUnload(() => {
+		if (segments.length > 0) {
+			saveTask()
+		}
+	})
+</script>
+
+<style>
+	.container {
+		flex: 1;
+		background-color: #f5f5f5;
+		padding: 20rpx;
+	}
+	
+	.info-section {
+		background-color: #ffffff;
+		border-radius: 16rpx;
+		padding: 24rpx;
+		margin-bottom: 20rpx;
+	}
+	
+	.info-row {
+		flex-direction: row;
+		padding: 8rpx 0;
+	}
+	
+	.info-label {
+		font-size: 26rpx;
+		color: #666666;
+		width: 160rpx;
+	}
+	
+	.info-value {
+		font-size: 26rpx;
+		color: #333333;
+		flex: 1;
+		lines: 1;
+		text-overflow: ellipsis;
+	}
+	
+	.progress-section {
+		background-color: #ffffff;
+		border-radius: 16rpx;
+		padding: 24rpx;
+		margin-bottom: 20rpx;
+	}
+	
+	.progress-header {
+		flex-direction: row;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 16rpx;
+	}
+	
+	.progress-title {
+		font-size: 30rpx;
+		font-weight: bold;
+		color: #333333;
+	}
+	
+	.progress-percent {
+		font-size: 36rpx;
+		font-weight: bold;
+		color: #007AFF;
+	}
+	
+	.progress-bar-bg {
+		height: 16rpx;
+		background-color: #e0e0e0;
+		border-radius: 8rpx;
+		overflow: hidden;
+	}
+	
+	.progress-bar-fill {
+		height: 16rpx;
+		background-color: #007AFF;
+		border-radius: 8rpx;
+	}
+	
+	.progress-stats {
+		flex-direction: row;
+		margin-top: 16rpx;
+	}
+	
+	.stats-item {
+		font-size: 24rpx;
+		color: #666666;
+		margin-right: 30rpx;
+	}
+	
+	.settings-section {
+		background-color: #ffffff;
+		border-radius: 16rpx;
+		padding: 24rpx;
+		margin-bottom: 20rpx;
+	}
+	
+	.setting-row {
+		flex-direction: row;
+		justify-content: space-between;
+		align-items: center;
+	}
+	
+	.setting-label {
+		font-size: 28rpx;
+		color: #333333;
+	}
+	
+	.setting-control {
+		flex-direction: row;
+		align-items: center;
+	}
+	
+	.control-btn {
+		width: 60rpx;
+		height: 60rpx;
+		background-color: #007AFF;
+		color: #ffffff;
+		font-size: 36rpx;
+		text-align: center;
+		line-height: 60rpx;
+		border-radius: 8rpx;
+	}
+	
+	.control-input {
+		width: 100rpx;
+		height: 60rpx;
+		font-size: 32rpx;
+		font-weight: bold;
+		color: #333333;
+		text-align: center;
+		background-color: #f5f5f5;
+		border-radius: 8rpx;
+		margin: 0 10rpx;
+	}
+	
+	.filename-section {
+		background-color: #ffffff;
+		border-radius: 16rpx;
+		padding: 24rpx;
+		margin-bottom: 20rpx;
+	}
+	
+	.filename-label {
+		font-size: 28rpx;
+		color: #333333;
+		margin-bottom: 16rpx;
+	}
+	
+	.filename-input-wrapper {
+		flex-direction: row;
+		align-items: center;
+		background-color: #f5f5f5;
+		border-radius: 8rpx;
+		padding: 0 16rpx;
+	}
+	
+	.filename-input {
+		flex: 1;
+		height: 80rpx;
+		font-size: 28rpx;
+		color: #333333;
+	}
+	
+	.filename-ext {
+		font-size: 28rpx;
+		color: #666666;
+	}
+	
+	.placeholder {
+		color: #999999;
+	}
+	
+	.exported-section {
+		background-color: #e8f5e9;
+		border-radius: 16rpx;
+		padding: 24rpx;
+		margin-bottom: 20rpx;
+	}
+	
+	.exported-title {
+		font-size: 32rpx;
+		font-weight: bold;
+		color: #4CAF50;
+		margin-bottom: 12rpx;
+	}
+	
+	.exported-path {
+		font-size: 24rpx;
+		color: #666666;
+		lines: 3;
+	}
+	
+	.action-section {
+		margin-top: 20rpx;
+	}
+	
+	.action-btn {
+		border-radius: 12rpx;
+		padding: 24rpx;
+		margin-bottom: 16rpx;
+	}
+	
+	.btn-start {
+		background-color: #007AFF;
+	}
+	
+	.btn-pause {
+		background-color: #FF9800;
+	}
+	
+	.btn-retry {
+		background-color: #f44336;
+	}
+	
+	.btn-merge {
+		background-color: #4CAF50;
+	}
+	
+	.btn-text {
+		color: #ffffff;
+		font-size: 32rpx;
+		text-align: center;
+	}
+</style>

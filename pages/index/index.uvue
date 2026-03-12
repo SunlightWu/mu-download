@@ -1,0 +1,346 @@
+<template>
+	<view class="container">
+		<view class="header">
+			<text class="app-title">工具箱</text>
+			<text class="app-desc">实用工具集合</text>
+		</view>
+		
+		<!-- 工具分类 -->
+		<view class="section">
+			<text class="section-title">视频工具</text>
+			<view class="tool-grid">
+				<view class="tool-item" @click="goToM3u8">
+					<view class="tool-icon-wrapper tool-icon-blue">
+						<text class="tool-icon">M3U8</text>
+					</view>
+					<text class="tool-name">M3U8下载</text>
+				</view>
+				
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">MP4</text>
+					</view>
+					<text class="tool-name">直链下载</text>
+				</view>
+				
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">转换</text>
+					</view>
+					<text class="tool-name">格式转换</text>
+				</view>
+				
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">提取</text>
+					</view>
+					<text class="tool-name">音频提取</text>
+				</view>
+			</view>
+		</view>
+		
+		<!-- 更多工具（预留） -->
+		<view class="section">
+			<text class="section-title">更多工具</text>
+			<view class="tool-grid">
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">二维码</text>
+					</view>
+					<text class="tool-name">扫码/生成</text>
+				</view>
+				
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">JSON</text>
+					</view>
+					<text class="tool-name">JSON格式化</text>
+				</view>
+				
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">Base64</text>
+					</view>
+					<text class="tool-name">编解码</text>
+				</view>
+				
+				<view class="tool-item tool-disabled">
+					<view class="tool-icon-wrapper tool-icon-gray">
+						<text class="tool-icon">...</text>
+					</view>
+					<text class="tool-name">敬请期待</text>
+				</view>
+			</view>
+		</view>
+		
+		<!-- 下载记录入口 -->
+		<view class="section" v-if="recentTasks.length > 0">
+			<view class="section-header">
+				<text class="section-title">下载记录</text>
+				<text class="section-more" @click="goToHistory">查看全部 ›</text>
+			</view>
+			<view class="recent-list">
+				<view 
+					v-for="task in recentTasks" 
+					:key="task.id" 
+					class="recent-item"
+					@click="goToDetail(task.id)"
+				>
+					<text class="recent-name">{{ task.fileName }}</text>
+					<text class="recent-status" :class="'status-' + task.status">
+						{{ getStatusText(task.status) }}
+					</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+	type TaskStatus = 'pending' | 'downloading' | 'paused' | 'completed' | 'failed' | 'merging'
+	
+	type RecentTask = {
+		id : string
+		fileName : string
+		status : TaskStatus
+	}
+	
+	const recentTasks = ref<RecentTask[]>([])
+	
+	const getStatusText = (status : TaskStatus) : string => {
+		switch (status) {
+			case 'pending': return '等待中'
+			case 'downloading': return '下载中'
+			case 'paused': return '已暂停'
+			case 'completed': return '已完成'
+			case 'failed': return '失败'
+			case 'merging': return '合并中'
+			default: return '未知'
+		}
+	}
+	
+	const loadRecentTasks = () : void => {
+		try {
+			const data = uni.getStorageSync('download_tasks') as string
+			if (data.length > 0) {
+				const parsed = JSON.parseArray(data)
+				if (parsed != null) {
+					const list : RecentTask[] = []
+					const count = Math.min(parsed.length, 3)
+					for (let i = 0; i < count; i++) {
+						const t = parsed[i] as UTSJSONObject
+						const config = t.getJSON('config')
+						if (config != null) {
+							const statusStr = t.getString('status') ?? 'pending'
+							let status : TaskStatus = 'pending'
+							if (statusStr.indexOf('下载中') != -1) {
+								status = 'downloading'
+							} else if (statusStr.indexOf('完成') != -1) {
+								status = 'completed'
+							} else if (statusStr.indexOf('失败') != -1) {
+								status = 'failed'
+							} else if (statusStr.indexOf('暂停') != -1) {
+								status = 'paused'
+							} else if (statusStr.indexOf('合并') != -1) {
+								status = 'merging'
+							}
+							list.push({
+								id: config.getString('id') ?? '',
+								fileName: config.getString('fileName') ?? '',
+								status: status
+							})
+						}
+					}
+					recentTasks.value = list
+				}
+			}
+		} catch (e) {
+			console.error('加载记录失败', e)
+		}
+	}
+	
+	const goToM3u8 = () : void => {
+		uni.navigateTo({
+			url: '/pages/m3u8/input'
+		})
+	}
+	
+	const goToHistory = () : void => {
+		uni.navigateTo({
+			url: '/pages/history/index'
+		})
+	}
+	
+	const goToDetail = (taskId : string) : void => {
+		uni.navigateTo({
+			url: `/pages/m3u8/detail?taskId=${taskId}`
+		})
+	}
+	
+	onShow(() => {
+		loadRecentTasks()
+	})
+</script>
+
+<style>
+	.container {
+		flex: 1;
+		background-color: #f5f5f5;
+	}
+	
+	.header {
+		background-color: #007AFF;
+		padding: 40rpx 30rpx;
+	}
+	
+	.app-title {
+		font-size: 44rpx;
+		font-weight: bold;
+		color: #ffffff;
+	}
+	
+	.app-desc {
+		font-size: 26rpx;
+		color: rgba(255, 255, 255, 0.8);
+		margin-top: 8rpx;
+	}
+	
+	.section {
+		background-color: #ffffff;
+		margin: 20rpx;
+		border-radius: 16rpx;
+		padding: 24rpx;
+	}
+	
+	.section-header {
+		flex-direction: row;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 16rpx;
+	}
+	
+	.section-title {
+		font-size: 30rpx;
+		font-weight: bold;
+		color: #333333;
+		margin-bottom: 20rpx;
+	}
+	
+	.section-more {
+		font-size: 26rpx;
+		color: #007AFF;
+	}
+	
+	.tool-grid {
+		flex-direction: row;
+		flex-wrap: wrap;
+	}
+	
+	.tool-item {
+		width: 25%;
+		align-items: center;
+		padding: 16rpx 0;
+	}
+	
+	.tool-disabled {
+		opacity: 0.4;
+	}
+	
+	.tool-icon-wrapper {
+		width: 90rpx;
+		height: 90rpx;
+		border-radius: 20rpx;
+		justify-content: center;
+		align-items: center;
+		margin-bottom: 12rpx;
+	}
+	
+	.tool-icon-blue {
+		background-color: #007AFF;
+	}
+	
+	.tool-icon-green {
+		background-color: #4CAF50;
+	}
+	
+	.tool-icon-orange {
+		background-color: #FF9800;
+	}
+	
+	.tool-icon-purple {
+		background-color: #9C27B0;
+	}
+	
+	.tool-icon-gray {
+		background-color: #9E9E9E;
+	}
+	
+	.tool-icon {
+		font-size: 22rpx;
+		font-weight: bold;
+		color: #ffffff;
+		text-align: center;
+	}
+	
+	.tool-name {
+		font-size: 24rpx;
+		color: #666666;
+		text-align: center;
+	}
+	
+	.recent-list {
+		margin-top: -10rpx;
+	}
+	
+	.recent-item {
+		flex-direction: row;
+		justify-content: space-between;
+		align-items: center;
+		padding: 20rpx 0;
+		border-bottom-width: 1px;
+		border-bottom-color: #f0f0f0;
+		border-bottom-style: solid;
+	}
+	
+	.recent-name {
+		font-size: 28rpx;
+		color: #333333;
+		flex: 1;
+	}
+	
+	.recent-status {
+		font-size: 24rpx;
+		padding: 4rpx 16rpx;
+		border-radius: 8rpx;
+	}
+	
+	.status-pending {
+		background-color: #e0e0e0;
+		color: #666666;
+	}
+	
+	.status-downloading {
+		background-color: #e3f2fd;
+		color: #1976d2;
+	}
+	
+	.status-paused {
+		background-color: #fff3e0;
+		color: #f57c00;
+	}
+	
+	.status-completed {
+		background-color: #e8f5e9;
+		color: #388e3c;
+	}
+	
+	.status-failed {
+		background-color: #ffebee;
+		color: #d32f2f;
+	}
+	
+	.status-merging {
+		background-color: #f3e5f5;
+		color: #7b1fa2;
+	}
+</style>
